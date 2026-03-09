@@ -1,6 +1,8 @@
 import pandas as pd
 import io
 import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
 def procesar_archivos(lista_archivos_subidos):
     lista_df = []
@@ -17,7 +19,7 @@ def procesar_archivos(lista_archivos_subidos):
                 archivo.seek(0)
             # LECTURA DEL CSV
             else:
-                df = pd.read_csv(archivo, skiprows=8, header=None)
+                df = pd.read_csv(archivo, skiprows=7, header=None)
                 df = df.iloc[:, [0, 4]]
                 df.columns = ['fecha_full', 'pp']
                 df['fecha_full'] = pd.to_datetime(df['fecha_full'], errors='coerce')
@@ -94,7 +96,154 @@ def generar_resumen_validacion(df):
     return resumen
 
 def extraer_info_estacion(archivo):
-    # El SENAMHI suele poner el nombre en las primeras líneas de los CSV
-    # Para los TXT es más difícil, pero podemos usar el nombre del archivo
-    nombre_archivo = archivo.name
-    return nombre_archivo.replace('.csv', '').replace('.txt', '').upper()
+# Valores por defecto
+    info = {
+        "Estación": "NO ENCONTRADA", 
+        "Departamento": "N/A", 
+        "Provincia": "N/A", 
+        "Distrito": "N/A", 
+        "Código": "N/A",
+        "Tipo": "N/A"
+    }
+    
+    try:
+        archivo.seek(0)
+        # Usamos latin-1 para evitar errores con tildes y eñes
+        contenido = archivo.getvalue().decode('latin-1').splitlines()
+        
+        for linea in contenido[:40]:
+            # Dividimos la línea por comas y eliminamos espacios en blanco de cada parte
+            partes = [p.strip() for p in linea.split(',')]
+            
+            for i, fragmento in enumerate(partes):
+                f_up = fragmento.upper()
+                
+                # Buscamos la etiqueta y tomamos el elemento que sigue en la lista
+                if "DEPARTAMENTO" in f_up and (i + 1) < len(partes):
+                    # El valor suele estar después de los dos puntos en la siguiente 'celda'
+                    info["Departamento"] = partes[i+1].replace(':', '').strip().upper()
+                
+                elif "PROVINCIA" in f_up and (i + 1) < len(partes):
+                    info["Provincia"] = partes[i+1].replace(':', '').strip().upper()
+                
+                elif "DISTRITO" in f_up and (i + 1) < len(partes):
+                    info["Distrito"] = partes[i+1].replace(':', '').strip().upper()
+                
+                elif "CODIGO" in f_up or "CÓDIGO" in f_up:
+                    # En tu CSV, el código está después de 'Código :,'
+                    info["Código"] = partes[i+1].replace(':', '').strip()
+
+                elif "TIPO" in f_up and (i + 1) < len (partes):
+                    info ["Tipo de estación"] = partes[i+1].replace(':','').strip().upper()
+                
+                elif "ESTACI" in f_up or "ESTACIÓN" in f_up:
+                    # Si la estación no tiene coma, la buscamos por los dos puntos
+                    if ":" in fragmento:
+                        info["Estación"] = fragmento.split(":")[-1].strip().upper()
+                    elif (i + 1) < len(partes):
+                        info["Estación"] = partes[i+1].replace(':', '').strip().upper()
+
+        archivo.seek(0)
+    except Exception:
+        archivo.seek(0)
+        
+    return info
+
+def grafico_pp_max_anual(df):
+    if df is None or df.empty: 
+        return None, 0, 0
+    
+    # Agrupamos por año para obtener la máxima anual
+    df_anual = df.groupby('año')['pp'].max().reset_index()
+    
+    # Cálculos de Percentiles Dinámicos
+    u_medio = df_anual['pp'].quantile(0.50)  # Mediana: Comportamiento habitual
+    u_alto = df_anual['pp'].quantile(0.90)   # Percentil 90: Evento extremo local
+    
+    # Definición de colores según el umbral de la propia estación
+    colores = [
+        '#e74c3c' if v > u_alto else '#f1c40f' if v > u_medio else '#2ecc71' 
+        for v in df_anual['pp']
+    ]
+
+    fig = go.Figure()
+
+    # Línea de umbral extremo (Percentil 90)
+    fig.add_hline(
+        y=u_alto, 
+        line_dash="dash", 
+        line_color="red", 
+        annotation_text=f"Umbral Crítico (> {u_alto:.1f} mm)",
+        annotation_position="top left"
+    )
+
+    # Puntos con colores dinámicos
+    fig.add_trace(go.Scatter(
+        x=df_anual['año'], 
+        y=df_anual['pp'],
+        mode='lines+markers',
+        line=dict(color='rgba(150, 150, 150, 0.3)', width=1),
+        marker=dict(size=10, color=colores, line=dict(width=1, color='DarkSlateGrey')),
+        name="Máxima Anual",
+        hovertemplate="<b>Año: %{x}</b><br>Precipitación: %{y} mm<extra></extra>"
+    ))
+
+    fig.update_layout(
+        xaxis_title="Año",
+        yaxis_title="PP Máx (mm)",
+        plot_bgcolor='white',
+        hovermode="x"
+    )
+
+    return fig, u_medio, u_alto
+
+def grafico_boxplot(df):
+    if df is None or df.empty: return None, "N/A"
+    
+    meses_nombres = {1:'Ene', 2:'Feb', 3:'Mar', 4:'Abr', 5:'May', 6:'Jun',
+                     7:'Jul', 8:'Ago', 9:'Set', 10:'Oct', 11:'Nov', 12:'Dic'}
+    
+    df_plot = df.copy()
+    df_plot['Nombre Mes'] = df_plot['mes'].map(meses_nombres)
+    
+    # Identificamos el mes con la mediana más alta (el mes "más lluvioso" habitualmente)
+    resumen_mensual = df.groupby('mes')['pp'].median()
+    mes_critico_num = resumen_mensual.idxmax()
+    mes_critico_nombre = meses_nombres[mes_critico_num]
+
+    # Creamos el Boxplot
+    fig = px.box(
+        df_plot, 
+        x='Nombre Mes', 
+        y='pp', 
+        points="outliers", # Resalta los eventos extremos (puntos aislados)
+        category_orders={"Nombre Mes": list(meses_nombres.values())},
+        color='Nombre Mes',
+        color_discrete_sequence=px.colors.qualitative.Safe,
+        labels={'pp':'Lluvia (mm)', 'Nombre Mes': 'Mes'}
+    )
+
+    fig.update_layout(plot_bgcolor='white', showlegend=False)
+    
+    return fig, mes_critico_nombre
+
+def grafico_histograma(df):
+    if df is None or df.empty: return None, 0
+    
+    # Filtrar solo días con lluvia para un mejor análisis de frecuencia
+    df_lluvia = df[df['pp'] > 0.1] 
+    
+    # Calcular el promedio de las lluvias diarias (solo días lluviosos)
+    media_intensidad = df_lluvia['pp'].mean()
+    
+    fig = px.histogram(
+        df_lluvia, 
+        x='pp', 
+        nbins=50,
+        labels={'pp':'Precipitación (mm)', 'count':'Número de días'},
+        color_discrete_sequence=['#2ecc71']
+    )
+    
+    fig.update_layout(plot_bgcolor='white', showlegend=False)
+    
+    return fig, media_intensidad
