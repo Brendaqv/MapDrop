@@ -222,7 +222,7 @@ if archivos:
         st.sidebar.markdown("---")
         st.sidebar.subheader("🛠️ Desarrollo y Autoría")
         st.sidebar.write("""
-        **Autora:** Brenda Quiroz 
+        **Autora:** Brenda Quiroz  
         **Colaboración:** Desarrollado con el apoyo de IA (Gemini,Claude).
         """)
 
