@@ -174,7 +174,7 @@ st.markdown("""
 with st.sidebar:
     # Cargar el logo local (Asegúrate de que el archivo se llame LOGO.jpg en tu carpeta)
     st.image("LOGO.jpg", use_container_width=True)
-    st.caption("<p style='text-align: center; color: gray; font-size: 0.8rem; margin-top: -5px'>Territorio, datos y conocimiento</p>", unsafe_allow_html=True)
+    st.caption("<p style='text-align: center; color: gray; font-size: 0.8rem; margin-top: -5px'>Educación y Geografía Aplicada</p>", unsafe_allow_html=True)
     st.markdown("---")
 
     # Subidor de archivos
@@ -234,8 +234,7 @@ if archivos:
         st.sidebar.markdown("---")
         st.sidebar.subheader("🛠️ Desarrollo y Autoría")
         st.sidebar.write(f"""
-        **Autora:** Brenda Quiroz 
-        **Idea Original:** Análisis de Precipitaciones.  
+        **Autora:** Brenda Quiroz   
         **Colaboración:** Desarrollado con el apoyo de IA (Gemini).
         """)
 
