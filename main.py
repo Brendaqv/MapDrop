@@ -28,7 +28,7 @@ st.markdown("""
     
     /* Reducir espacio superior */
     .block-container {
-        padding-top: 1.5rem !important;
+        padding-top: 2.5rem !important;
     }
 
     /* Sidebar */
