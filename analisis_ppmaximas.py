@@ -436,6 +436,21 @@ def extraer_info_estacion(archivo, todos_los_archivos=None):
                 val = buscar_valor(partes, "TIPO")
                 if val:
                     info["Tipo"] = val.upper()
+            if "LATITUD" in linea_up and "Latitud" not in info:
+                val = buscar_valor(partes, "LATITUD")
+                if val:
+                    # Convertir grados-minutos-segundos a decimal si es necesario
+                    try:
+                        info["Latitud"] = float(val.replace(',', '.').split()[0])
+                    except Exception:
+                        info["Latitud"] = val
+            if "LONGITUD" in linea_up and "Longitud" not in info:
+                val = buscar_valor(partes, "LONGITUD")
+                if val:
+                    try:
+                        info["Longitud"] = float(val.replace(',', '.').split()[0])
+                    except Exception:
+                        info["Longitud"] = val
         return info
 
     try:
@@ -491,10 +506,12 @@ def extraer_info_estacion(archivo, todos_los_archivos=None):
 # GRÁFICOS DIARIOS
 # ─────────────────────────────────────────────
 
-def grafico_pp_max_anual(df):
+def grafico_pp_max_anual(df, filtrar_ceros=False):
     if df is None or df.empty:
         return None, 0, 0
     df_anual = df.groupby('año')['pp'].max().reset_index()
+    if filtrar_ceros:
+        df_anual = df_anual[df_anual['pp'] > 0].reset_index(drop=True)
     # Percentiles completos — misma paleta que la tabla de umbrales
     u_p10  = df_anual['pp'].quantile(0.10)
     u_p25  = df_anual['pp'].quantile(0.25)
@@ -654,3 +671,45 @@ def grafico_intensidad_por_hora(df_horario):
     layout['yaxis'] = {**BASE_LAYOUT['yaxis'], 'title': 'Intensidad media (mm/h)'}
     fig.update_layout(**layout)
     return fig
+
+# ─────────────────────────────────────────────
+# ANÁLISIS MULTI-ESTACIÓN
+# ─────────────────────────────────────────────
+
+def analizar_multiples_estaciones(lista_grupos):
+    """
+    Recibe lista de dicts con:
+      { 'nombre', 'lat', 'lon', 'codigo', 'df' }
+    Retorna DataFrame resumen con estadísticos por estación.
+    """
+    import numpy as np
+    filas = []
+    for g in lista_grupos:
+        df = g.get('df')
+        if df is None or df.empty:
+            continue
+        df_anual = df.groupby('año')['pp'].max().reset_index()
+        n_años = len(df_anual)
+        pp_max = round(df['pp'].max(), 1)
+        media_anual = round(df.groupby('año')['pp'].sum().mean(), 1)
+        p50 = round(df_anual['pp'].quantile(0.50), 1)
+        p90 = round(df_anual['pp'].quantile(0.90), 1)
+        año_min = int(df['año'].min())
+        año_max = int(df['año'].max())
+
+        filas.append({
+            'Estación':        g.get('nombre', 'N/A'),
+            'Código':          g.get('codigo', 'N/A'),
+            'Latitud':         g.get('lat', None),
+            'Longitud':        g.get('lon', None),
+            'Período':         f"{año_min}–{año_max}",
+            'N° años':         n_años,
+            'PP Máx abs (mm)': pp_max,
+            'PP Media anual (mm)': media_anual,
+            'P50 (mm)':        p50,
+            'P90 (mm)':        p90,
+        })
+
+    if not filas:
+        return None
+    return pd.DataFrame(filas)

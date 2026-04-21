@@ -179,8 +179,82 @@ with st.sidebar:
     st.caption("<p style='text-align: center; color: gray; font-size: 0.8rem; margin-top: -5px'>Territorio, datos y conocimiento</p>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Subidor de archivos (acepta csv, txt y xlsx)
-    archivos = st.file_uploader("", type=['csv', 'txt', 'xlsx'], accept_multiple_files=True)
+    # ── SISTEMA DINÁMICO MULTI-ESTACIÓN ──
+    # Cada "slot" es un uploader independiente con su propia key.
+    # El usuario puede agregar tantos slots como estaciones quiera comparar.
+    import io as _io
+
+    if 'n_slots' not in st.session_state:
+        st.session_state.n_slots = 1
+    if 'archivos_acumulados' not in st.session_state:
+        st.session_state.archivos_acumulados = {}
+
+    # Renderizar un uploader por slot
+    for slot_i in range(st.session_state.n_slots):
+        # Label dinámico: muestra nombre de estación si ya hay archivos en este slot
+        archivos_slot = [v for v in st.session_state.archivos_acumulados.values()
+                         if isinstance(v, dict) and v.get('slot') == slot_i]
+        if archivos_slot and st.session_state.n_slots > 1:
+            try:
+                primer = archivos_slot[0]
+                buf_label = _io.BytesIO(primer['data'])
+                buf_label.name = primer['name']
+                meta_label = ana.extraer_info_estacion(buf_label)
+                nombre_label = meta_label.get('Estación', '')
+                label = f"📂 {nombre_label}" if nombre_label and nombre_label != 'NO ENCONTRADA' else f"📂 Estación {slot_i + 1}"
+            except Exception:
+                label = f"📂 Estación {slot_i + 1}"
+        elif st.session_state.n_slots > 1:
+            label = f"📂 Estación {slot_i + 1}"
+        else:
+            label = ""
+
+        nuevos_slot = st.file_uploader(
+            label,
+            type=['csv', 'txt', 'xlsx'],
+            accept_multiple_files=True,
+            key=f"uploader_slot_{slot_i}",
+        )
+        if nuevos_slot:
+            for a in nuevos_slot:
+                a.seek(0)
+                # Clave slot_N/nombre — evita colisión entre estaciones con mismo nombre de archivo
+                clave = f"slot_{slot_i}/{a.name}"
+                st.session_state.archivos_acumulados[clave] = {
+                    'data': a.read(),
+                    'name': a.name,
+                    'slot': slot_i,
+                }
+                a.seek(0)
+
+    # Botones: agregar slot y limpiar todo
+    col_add, col_clear = st.columns([1, 1])
+    with col_add:
+        if st.button("➕ Agregar estación", use_container_width=True):
+            st.session_state.n_slots += 1
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ Limpiar todo", use_container_width=True):
+            st.session_state.archivos_acumulados = {}
+            st.session_state.n_slots = 1
+            st.rerun()
+
+    # Resumen de archivos acumulados
+    n_acum = len(st.session_state.archivos_acumulados)
+    if n_acum > 0:
+        st.caption(f"📂 {n_acum} archivo(s) acumulado(s) en total")
+
+    # Reconstruir lista de archivos desde session_state
+    archivos = []
+    for clave, info in st.session_state.archivos_acumulados.items():
+        if isinstance(info, dict):
+            buf = _io.BytesIO(info['data'])
+            buf.name = info['name']
+        else:
+            # Compatibilidad con formato antiguo
+            buf = _io.BytesIO(info)
+            buf.name = clave
+        archivos.append(buf)
 
     # ── BUSCADOR DE ESTACIONES SENAMHI ──
     st.markdown("---")
@@ -228,20 +302,107 @@ if archivos:
 
     metadata = ana.extraer_info_estacion(archivos[0], todos_los_archivos=archivos)
 
-    st.markdown(f"""
-    <div style="background:#f4faf7; border-left:4px solid #6db38a; border-radius:8px; padding:14px 20px; margin-bottom:1rem;">
-        <div style="font-size:0.75rem; color:#3d7a5a; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">
-            📍 Estación activa
+    # ── Detectar cuántas estaciones hay para mostrar el panel correcto ──
+    # Agrupar archivos por nombre de estación (lectura rápida de cabecera)
+    # Construir mapa slot→nombre para TXT (usa nombre del CSV del mismo slot)
+    _slot_nombre = {}
+    _slot_meta = {}
+    for _clave, _info in st.session_state.archivos_acumulados.items():
+        if not isinstance(_info, dict): continue
+        _slot_i = _info.get('slot', 0)
+        _nombre_arch = _info.get('name', '')
+        if not _nombre_arch.lower().endswith('.txt'):
+            try:
+                _buf_tmp = _io.BytesIO(_info['data'])
+                _buf_tmp.name = _nombre_arch
+                _meta_tmp = ana.extraer_info_estacion(_buf_tmp)
+                _nom_tmp = _meta_tmp.get('Estación', '')
+                if _nom_tmp and _nom_tmp != 'NO ENCONTRADA':
+                    _slot_nombre[_slot_i] = _nom_tmp
+                    _slot_meta[_slot_i] = _meta_tmp
+            except Exception:
+                pass
+
+    _grupos_preview = {}
+    for _a in archivos:
+        try:
+            _a.seek(0)
+            _tipo_a = ana.detectar_tipo_archivo(_a)['tipo']
+            _a.seek(0)
+            if _tipo_a == 'txt':
+                # Buscar slot del archivo para heredar nombre de su estación
+                _slot_del_txt = None
+                for _clave, _info in st.session_state.archivos_acumulados.items():
+                    if isinstance(_info, dict) and _info.get('name') == _a.name:
+                        _slot_del_txt = _info.get('slot', 0)
+                        break
+                if _slot_del_txt is not None and _slot_del_txt in _slot_nombre:
+                    _nom = _slot_nombre[_slot_del_txt]
+                    _meta = _slot_meta[_slot_del_txt]
+                else:
+                    _nom = _a.name.rsplit('.', 1)[0].upper()
+                    _meta = {'Departamento': '—', 'Provincia': '—', 'Distrito': '—'}
+            else:
+                _meta = ana.extraer_info_estacion(_a, todos_los_archivos=archivos)
+                _nom = _meta.get('Estación', 'DESCONOCIDA')
+            _a.seek(0)
+            if _nom not in _grupos_preview:
+                _grupos_preview[_nom] = {'meta': _meta, 'n': 0, 'tipo': _tipo_a}
+            _grupos_preview[_nom]['n'] += 1
+        except Exception:
+            try: _a.seek(0)
+            except Exception: pass
+
+    _tipo_label = {'txt': 'TXT Convencional', 'csv_convencional': 'CSV Convencional',
+                   'csv_ema': 'EMA (Automática)', 'xlsx': 'XLSX (MapDrop)'}
+
+    if len(_grupos_preview) <= 1:
+        # ── Panel de estación única ──
+        st.markdown(f"""
+        <div style="background:#f4faf7; border-left:4px solid #6db38a; border-radius:8px; padding:14px 20px; margin-bottom:1rem;">
+            <div style="font-size:0.75rem; color:#3d7a5a; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">
+                📍 Estación activa
+            </div>
+            <div style="font-size:1.5rem; font-weight:800; color:#1a1a1a; margin-bottom:8px;">
+                {metadata['Estación']}
+            </div>
+            <div style="display:flex; gap:40px; font-size:0.9rem; color:#555;">
+                <div><span style="font-weight:600; color:#2e4d31;">Departamento:</span>&nbsp; {metadata['Departamento']}</div>
+                <div><span style="font-weight:600; color:#2e4d31;">Provincia / Distrito:</span>&nbsp; {metadata['Provincia']} / {metadata['Distrito']}</div>
+            </div>
         </div>
-        <div style="font-size:1.5rem; font-weight:800; color:#1a1a1a; margin-bottom:8px;">
-            {metadata['Estación']}
-        </div>
-        <div style="display:flex; gap:40px; font-size:0.9rem; color:#555;">
-            <div><span style="font-weight:600; color:#2e4d31;">Departamento:</span>&nbsp; {metadata['Departamento']}</div>
-            <div><span style="font-weight:600; color:#2e4d31;">Provincia / Distrito:</span>&nbsp; {metadata['Provincia']} / {metadata['Distrito']}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    else:
+        # ── Panel multi-estación: tarjetas ──
+        st.markdown(f"""
+        <div style="font-size:0.75rem; color:#3d7a5a; font-weight:700; text-transform:uppercase;
+                    letter-spacing:1px; margin-bottom:8px;">
+            📍 {len(_grupos_preview)} estaciones cargadas
+        </div>""", unsafe_allow_html=True)
+
+        cols = st.columns(len(_grupos_preview))
+        for col, (nom, info) in zip(cols, _grupos_preview.items()):
+            meta = info['meta']
+            tipo = _tipo_label.get(info['tipo'], info['tipo'])
+            n_arch = info['n']
+            with col:
+                st.markdown(f"""
+                <div style="background:#f4faf7; border-left:4px solid #6db38a; border-radius:8px;
+                            padding:12px 16px; margin-bottom:1rem; height:100%;">
+                    <div style="font-size:1rem; font-weight:800; color:#1a1a1a; margin-bottom:6px;">
+                        {nom}
+                    </div>
+                    <div style="font-size:0.78rem; color:#3d7a5a; font-weight:600; margin-bottom:4px;">
+                        {tipo}
+                    </div>
+                    <div style="font-size:0.78rem; color:#555; margin-bottom:2px;">
+                        📁 {n_arch} archivo(s)
+                    </div>
+                    <div style="font-size:0.78rem; color:#555;">
+                        {meta.get('Departamento','—')} · {meta.get('Provincia','—')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
     # --- BANNER DE FUENTES (expander colapsado) ---
     if len(archivos) > 1:
@@ -319,7 +480,36 @@ if archivos:
             st.stop()
 
     # --- PROCESAMIENTO DE DATOS ---
-    df_todo = ana.procesar_archivos(archivos, modo='diario')
+    # Detectar si hay múltiples estaciones ANTES de procesar
+    # para evitar mezclar datos de estaciones distintas en df_todo
+    _grupos_slots = {}
+    for _a in archivos:
+        try:
+            _a.seek(0)
+            _t = ana.detectar_tipo_archivo(_a)['tipo']
+            _a.seek(0)
+            # Obtener slot del archivo desde session_state
+            _slot = 0
+            for _c, _i in st.session_state.get('archivos_acumulados', {}).items():
+                if isinstance(_i, dict) and _i.get('name') == _a.name:
+                    _slot = _i.get('slot', 0)
+                    break
+            if _slot not in _grupos_slots:
+                _grupos_slots[_slot] = []
+            _grupos_slots[_slot].append(_a)
+            _a.seek(0)
+        except Exception:
+            try: _a.seek(0)
+            except Exception: pass
+
+    # Si hay más de un slot → procesar solo el slot 0 como "estación activa"
+    # El resumen comparativo usa grupos_estaciones para las demás
+    if len(_grupos_slots) > 1:
+        _archivos_activos = _grupos_slots.get(0, archivos)
+        for _a in _archivos_activos: _a.seek(0)
+        df_todo = ana.procesar_archivos(_archivos_activos, modo='diario')
+    else:
+        df_todo = ana.procesar_archivos(archivos, modo='diario')
 
     # Para modo horario, también calcular serie horaria completa
     if es_ema and modo_analisis == 'horario':
@@ -354,6 +544,112 @@ if archivos:
         # Tab 3: Indicadores PP Horaria (solo si hay EMA en modo horario)
         # Tab 4: Temperatura y Clima (solo si hay archivos de temperatura)
 
+        # ── Detección y agrupación de múltiples estaciones ──
+        # Lee la cabecera de cada CSV para identificar a qué estación pertenece.
+        # TXT sin cabecera usan el nombre del archivo como identificador.
+        # Paso 1: construir mapa slot→nombre desde los CSVs (que sí tienen metadatos)
+        _slot_nombre_map = {}
+        _slot_meta_map = {}
+        for _clave, _info in st.session_state.archivos_acumulados.items():
+            if not isinstance(_info, dict): continue
+            _slot_i = _info.get('slot', 0)
+            _nombre_arch = _info.get('name', '')
+            if not _nombre_arch.lower().endswith('.txt'):
+                try:
+                    _buf_tmp = _io.BytesIO(_info['data'])
+                    _buf_tmp.name = _nombre_arch
+                    _meta_tmp = ana.extraer_info_estacion(_buf_tmp)
+                    _nom_tmp = _meta_tmp.get('Estación', '')
+                    if _nom_tmp and _nom_tmp != 'NO ENCONTRADA':
+                        _slot_nombre_map[_slot_i] = _nom_tmp
+                        _slot_meta_map[_slot_i] = _meta_tmp
+                except Exception:
+                    pass
+
+        # Paso 2: agrupar archivos por estación
+        grupos_raw = {}  # nombre_estacion → lista de archivos
+        for a in archivos:
+            try:
+                a.seek(0)
+                tipo_a = ana.detectar_tipo_archivo(a)['tipo']
+                a.seek(0)
+                if tipo_a == 'txt':
+                    # TXT hereda nombre del CSV del mismo slot
+                    _slot_del_txt = None
+                    for _clave, _info in st.session_state.archivos_acumulados.items():
+                        if isinstance(_info, dict) and _info.get('name') == a.name:
+                            _slot_del_txt = _info.get('slot', 0)
+                            break
+                    if _slot_del_txt is not None and _slot_del_txt in _slot_nombre_map:
+                        nombre_a = _slot_nombre_map[_slot_del_txt]
+                        meta_a = _slot_meta_map[_slot_del_txt]
+                    else:
+                        nombre_a = a.name.rsplit('.', 1)[0].upper()
+                        meta_a = {'Código': '', 'Departamento': 'N/A', 'Provincia': 'N/A', 'Distrito': 'N/A'}
+                elif tipo_a == 'csv_ema':
+                    meta_a = ana.extraer_info_estacion(a, todos_los_archivos=archivos)
+                    nombre_a = meta_a.get('Estación', a.name.rsplit('.', 1)[0].upper())
+                    a.seek(0)
+                else:
+                    meta_a = ana.extraer_info_estacion(a, todos_los_archivos=archivos)
+                    nombre_a = meta_a.get('Estación', 'DESCONOCIDA')
+                    a.seek(0)
+
+                if nombre_a not in grupos_raw:
+                    grupos_raw[nombre_a] = {'archivos': [], 'meta': meta_a}
+                grupos_raw[nombre_a]['archivos'].append(a)
+                a.seek(0)
+            except Exception:
+                try: a.seek(0)
+                except Exception: pass
+
+        # Procesar cada grupo de estación
+        grupos_estaciones = {}
+        for nombre_e, grupo in grupos_raw.items():
+            try:
+                for a in grupo['archivos']: a.seek(0)
+                df_e = ana.procesar_archivos(grupo['archivos'], modo='diario')
+                if df_e is not None and not df_e.empty:
+                    grupos_estaciones[nombre_e] = {
+                        'nombre': nombre_e,
+                        'codigo': grupo['meta'].get('Código', ''),
+                        'lat': grupo['meta'].get('Latitud', None),
+                        'lon': grupo['meta'].get('Longitud', None),
+                        'df': df_e,
+                    }
+                for a in grupo['archivos']: a.seek(0)
+            except Exception:
+                pass
+
+        es_multi = len(grupos_estaciones) > 1
+
+        # ── RESUMEN COMPARATIVO debajo de tarjetas (antes de pestañas) ──
+        if es_multi:
+            st.markdown("---")
+            st.markdown("### 📊 Resumen de Estaciones")
+            _lista_grupos = list(grupos_estaciones.values())
+            _df_multi = ana.analizar_multiples_estaciones(_lista_grupos)
+            if _df_multi is not None and not _df_multi.empty:
+                st.dataframe(_df_multi.set_index('Estación'), use_container_width=True)
+                st.info(
+                    "💡 Con las columnas **Latitud** y **Longitud** puedes llevar estos valores a QGIS "
+                    "para generar mapas de isolíneas de precipitación por región — "
+                    "funcionalidad que pronto integraremos."
+                )
+                _buf_multi = io.BytesIO()
+                with pd.ExcelWriter(_buf_multi, engine='xlsxwriter') as _writer:
+                    _df_multi.to_excel(_writer, index=False, sheet_name='Comparacion_Estaciones')
+                _buf_multi.seek(0)
+                st.download_button(
+                    label="📥 Descargar tabla comparativa (.xlsx)",
+                    data=_buf_multi.getvalue(),
+                    file_name="MapDrop_Comparacion_Estaciones.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            st.markdown("---")
+
+        # Comparar Estaciones aparece debajo de las tarjetas, no como pestaña
         tab_labels = ["🕵️ Validación de datos", "📊 Indicadores PP Diaria"]
         if es_ema and modo_analisis == 'horario':
             tab_labels.append("⏱️ Indicadores PP Horaria")
@@ -364,7 +660,12 @@ if archivos:
         tab1 = tabs[0]
         tab2 = tabs[1]
         tab3 = tabs[2] if (es_ema and modo_analisis == 'horario') else None
-        tab_temp = tabs[-1] if es_temperatura else None
+        # tab_temp: índice explícito para evitar conflicto con otros tabs
+        if es_temperatura:
+            idx_temp = 2 + (1 if (es_ema and modo_analisis == 'horario') else 0)
+            tab_temp = tabs[idx_temp] if idx_temp < len(tabs) else None
+        else:
+            tab_temp = None
 
         # ═══════════════════════════════════════════════════
         # TAB 1 — VALIDACIÓN DE DATOS
@@ -553,31 +854,50 @@ if archivos:
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Checkbox: excluir máximo histórico del cálculo de percentiles ──
-            excluir_maximo = st.checkbox(
-                "⚙️ Excluir el valor máximo histórico del cálculo de percentiles",
-                value=False,
-                help=(
-                    "El valor máximo absoluto siempre se muestra en las métricas y gráficos — esta opción "
-                    "solo afecta el cálculo de los umbrales estadísticos (P10–P90).\n\n"
-                    "✅ Recomendado para caracterización climática: elimina la influencia de un evento "
-                    "excepcional sobre la distribución típica, especialmente en series cortas (<20 años).\n\n"
-                    "❌ No recomendado para evaluación de peligros o EVAR: en ese caso usa el "
-                    "Análisis de Frecuencias (Gumbel), donde el evento extremo es información crítica "
-                    "para estimar períodos de retorno."
+            # ── Opciones de cálculo ──
+            col_chk1, col_chk2 = st.columns(2)
+            with col_chk1:
+                solo_con_lluvia = st.checkbox(
+                    "☔ Solo años con lluvia registrada (PP máx > 0)",
+                    value=True,
+                    help=(
+                        "Excluye los años donde la precipitación máxima diaria registrada fue 0 mm. "
+                        "Estos años suelen corresponder a períodos sin datos o sin eventos de lluvia, "
+                        "y distorsionan los percentiles hacia abajo.\n\n"
+                        "✅ Recomendado en casi todos los casos."
+                    )
                 )
-            )
+            with col_chk2:
+                excluir_maximo = st.checkbox(
+                    "⚙️ Excluir el valor máximo histórico",
+                    value=False,
+                    help=(
+                        "El valor máximo absoluto siempre se muestra en métricas y gráficos — "
+                        "esta opción solo afecta el cálculo de percentiles (P10–P90).\n\n"
+                        "✅ Útil para caracterización climática en series con eventos extremos aislados.\n\n"
+                        "❌ No recomendado para evaluación de peligros o EVAR."
+                    )
+                )
 
             # Percentiles — cálculo completo con rangos
             df_anual_tab2 = df_diario.groupby('año')['pp'].max().reset_index()
             n_años_serie = len(df_anual_tab2)
             pp_max_abs = df_anual_tab2['pp'].max()
 
+            # Filtrar años sin lluvia si se solicita
+            notas_exclusion = []
+            if solo_con_lluvia:
+                n_antes = len(df_anual_tab2)
+                df_anual_tab2 = df_anual_tab2[df_anual_tab2['pp'] > 0].reset_index(drop=True)
+                n_excluidos = n_antes - len(df_anual_tab2)
+                if n_excluidos > 0:
+                    notas_exclusion.append(f"☔ {n_excluidos} año(s) con PP máx = 0 excluidos del cálculo de percentiles.")
+
             # Serie para percentiles: con o sin el máximo histórico
             if excluir_maximo:
                 idx_max = df_anual_tab2['pp'].idxmax()
                 df_perc = df_anual_tab2.drop(index=idx_max).reset_index(drop=True)
-                nota_exclusion = f"⚠️ Percentiles calculados excluyendo el valor máximo histórico ({pp_max_abs:.1f} mm). Serie usada: {len(df_perc)} de {n_años_serie} años."
+                notas_exclusion.append(f"⚙️ Valor máximo histórico ({pp_max_abs:.1f} mm) excluido. Serie usada: {len(df_perc)} de {n_años_serie} años.")
             else:
                 df_perc = df_anual_tab2.copy()
                 nota_exclusion = None
@@ -591,8 +911,8 @@ if archivos:
             pct_años_sobre_p90 = round(len(df_anual_tab2[df_anual_tab2['pp'] > p90_tab2]) / n_años_serie * 100, 1)
             n_años_sobre_p90 = len(df_anual_tab2[df_anual_tab2['pp'] > p90_tab2])
 
-            if nota_exclusion:
-                st.caption(nota_exclusion)
+            for _nota in notas_exclusion:
+                st.caption(_nota)
 
             # Frases en lenguaje natural con rangos completos
             frase_bajo_p10 = f"En 1 de cada 10 años la máxima diaria no supera los <strong>{p10_tab2} mm</strong> — año excepcionalmente seco en términos de eventos extremos."
@@ -697,7 +1017,7 @@ if archivos:
             st.divider()
 
             # --- GRÁFICOS (integrados en esta misma pestaña) ---
-            f1_dinamico, umbral_medio, umbral_alto = ana.grafico_pp_max_anual(df_todo)
+            f1_dinamico, umbral_medio, umbral_alto = ana.grafico_pp_max_anual(df_todo, filtrar_ceros=solo_con_lluvia)
             f2_boxplot, mes_habitual = ana.grafico_boxplot(df_todo)
             f3_hist, intensidad_media = ana.grafico_histograma(df_todo)
             max_historico = df_todo['pp'].max()
@@ -1032,6 +1352,9 @@ if archivos:
                 else:
                     st.warning("No se pudieron procesar los archivos de temperatura. Verifica que el formato sea el correcto (CSV SENAMHI con columnas MAX, MIN, HR).")
 
+        # ═══════════════════════════════════════════════════
+        # TAB COMPARAR ESTACIONES
+        # ═══════════════════════════════════════════════════
     else:
         st.error("No se pudieron procesar los archivos.")
 else:
